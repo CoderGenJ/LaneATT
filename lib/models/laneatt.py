@@ -3,7 +3,9 @@ import math
 import cv2
 import torch
 import numpy as np
+# torch.nn 是 PyTorch 中的一个模块，提供了构建和训练神经网络的基本组件。这个模块包括了各种神经网络层、损失函数、优化器等
 import torch.nn as nn
+#预训练的计算机视觉模型,常用的backbone都有,可以直接加载
 from torchvision.models import resnet18, resnet34
 
 from nms import nms
@@ -26,15 +28,23 @@ class LaneATT(nn.Module):
                  anchor_feat_channels=64):
         super(LaneATT, self).__init__()
         # Some definitions
+        #self.feature_extractor:模型
+        #backbone_nb_channels:最后一块的深度(通道数)
+        #stride步长
         self.feature_extractor, backbone_nb_channels, self.stride = get_backbone(backbone, pretrained_backbone)
+        #图像的宽
         self.img_w = img_w
         self.n_strips = S - 1
+        #S:表示x方向的offset的个数,表示anchor和实际曲线在72个采样点的offset
         self.n_offsets = S
+        #?
         self.fmap_h = img_h // self.stride
         fmap_w = img_w // self.stride
         self.fmap_w = fmap_w
+        #?
         self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32)
         self.anchor_cut_ys = torch.linspace(1, 0, steps=self.fmap_h, dtype=torch.float32)
+        #?
         self.anchor_feat_channels = anchor_feat_channels
 
         # Anchor angles, same ones used in Line-CNN
@@ -237,22 +247,24 @@ class LaneATT(nn.Module):
             batch_anchor_features[batch_idx] = rois
 
         return batch_anchor_features
-
+    #lateral_n:侧边
+    #bottom_n:底边
     def generate_anchors(self, lateral_n, bottom_n):
         left_anchors, left_cut = self.generate_side_anchors(self.left_angles, x=0., nb_origins=lateral_n)
         right_anchors, right_cut = self.generate_side_anchors(self.right_angles, x=1., nb_origins=lateral_n)
         bottom_anchors, bottom_cut = self.generate_side_anchors(self.bottom_angles, y=1., nb_origins=bottom_n)
 
         return torch.cat([left_anchors, bottom_anchors, right_anchors]), torch.cat([left_cut, bottom_cut, right_cut])
-
+    #生成anchors
     def generate_side_anchors(self, angles, nb_origins, x=None, y=None):
+        #1.生成左右边/底边的起始坐标,个数为nb_origins (侧边:72 底面:128)
         if x is None and y is not None:
             starts = [(x, y) for x in np.linspace(1., 0., num=nb_origins)]
         elif x is not None and y is None:
             starts = [(x, y) for y in np.linspace(1., 0., num=nb_origins)]
         else:
             raise Exception('Please define exactly one of `x` or `y` (not neither nor both)')
-
+        #2.侧边
         n_anchors = nb_origins * len(angles)
 
         # each row, first for x and second for y:
@@ -383,6 +395,7 @@ def get_backbone(backbone, pretrained=False):
         fmap_c = 64
         stride = 4
     elif backbone == 'resnet34':
+        #获取预训练结构,并去除最后两层,全连接和池化层,只保留特征层
         backbone = torch.nn.Sequential(*list(resnet34(pretrained=pretrained).children())[:-2])
         fmap_c = 512
         stride = 32
