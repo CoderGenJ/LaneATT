@@ -37,17 +37,21 @@ class LaneATT(nn.Module):
         self.n_strips = S - 1
         #S:表示x方向的offset的个数,表示anchor和实际曲线在72个采样点的offset
         self.n_offsets = S
-        #?
+        #feature map的w
+        #feature map的h  
+        #图片/步长 = 降维后的feature map的宽高
         self.fmap_h = img_h // self.stride
         fmap_w = img_w // self.stride
         self.fmap_w = fmap_w
-        #?
+        #x的偏移量 
         self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32)
         self.anchor_cut_ys = torch.linspace(1, 0, steps=self.fmap_h, dtype=torch.float32)
-        #?
+        #anchor的深度为什么是64呀?不应该是类别+偏移+.. 么?
         self.anchor_feat_channels = anchor_feat_channels
 
         # Anchor angles, same ones used in Line-CNN
+        # 这个和linecnn一样,就是在图像的左右两边和底边的像素点生成如下角度的直线,作为anchor,也是车道线可能的初始位置
+        # 训练的anchor内容则是anchor的偏移量的大小 / 置信度 /类别(车道线/背景)
         self.left_angles = [72., 60., 49., 39., 30., 22.]
         self.right_angles = [108., 120., 131., 141., 150., 158.]
         self.bottom_angles = [165., 150., 141., 131., 120., 108., 100., 90., 80., 72., 60., 49., 39., 30., 15.]
@@ -57,6 +61,7 @@ class LaneATT(nn.Module):
 
         # Filter masks if `anchors_freq_path` is provided
         if anchors_freq_path is not None:
+            #加载到cpu上
             anchors_mask = torch.load(anchors_freq_path).cpu()
             assert topk_anchors is not None
             ind = torch.argsort(anchors_mask, descending=True)[:topk_anchors]
@@ -64,25 +69,38 @@ class LaneATT(nn.Module):
             self.anchors_cut = self.anchors_cut[ind]
 
         # Pre compute indices for the anchor pooling
+        #?
         self.cut_zs, self.cut_ys, self.cut_xs, self.invalid_mask = self.compute_anchor_cut_indices(
             self.anchor_feat_channels, fmap_w, self.fmap_h)
 
         # Setup and initialize layers
+        #生成卷积层. 
+        #backbone_nb_channels:最后一层的深度,
+        #维度:1*1*backbone_nb_channels*anchor_feat_channels卷积核
         self.conv1 = nn.Conv2d(backbone_nb_channels, self.anchor_feat_channels, kernel_size=1)
+        #全连接层:连接层的作用是对输入张量进行线性变换，输出新的张量
+        #全连接层连接的一定是二维层,且没有深度的层
+        #作用是通过线性变换,将二维层转换为需要的输出
         self.cls_layer = nn.Linear(2 * self.anchor_feat_channels * self.fmap_h, 2)
         self.reg_layer = nn.Linear(2 * self.anchor_feat_channels * self.fmap_h, self.n_offsets + 1)
         self.attention_layer = nn.Linear(self.anchor_feat_channels * self.fmap_h, len(self.anchors) - 1)
+
+        #初始化 卷积层/两个全连接层/注意力层
         self.initialize_layer(self.attention_layer)
         self.initialize_layer(self.conv1)
         self.initialize_layer(self.cls_layer)
         self.initialize_layer(self.reg_layer)
 
     def forward(self, x, conf_threshold=None, nms_thres=0, nms_topk=3000):
+        #1.输入图片到backbone,然后输出特征图
         batch_features = self.feature_extractor(x)
+        #2.1*1卷积,改变深度成为 anchor_feat_channels
         batch_features = self.conv1(batch_features)
+        #3.
         batch_anchor_features = self.cut_anchor_features(batch_features)
 
         # Join proposals from all images into a single proposals features batch
+        # 重塑张量,比如将(10,3,2,2)转换成二维(10,3*2*2),一般用于全连接前面
         batch_anchor_features = batch_anchor_features.view(-1, self.anchor_feat_channels * self.fmap_h)
 
         # Add attention features
@@ -101,7 +119,9 @@ class LaneATT(nn.Module):
         batch_anchor_features = torch.cat((attention_features, batch_anchor_features), dim=1)
 
         # Predict
+        # 输入feature层/输出全连接层的分类结果
         cls_logits = self.cls_layer(batch_anchor_features)
+        # 输入feature层/输出全连接层的回归结果
         reg = self.reg_layer(batch_anchor_features)
 
         # Undo joining
@@ -109,14 +129,15 @@ class LaneATT(nn.Module):
         reg = reg.reshape(x.shape[0], -1, reg.shape[1])
 
         # Add offsets to anchors
+        # 解码,相当于把结果解析一下
         reg_proposals = torch.zeros((*cls_logits.shape[:2], 5 + self.n_offsets), device=x.device)
         reg_proposals += self.anchors
         reg_proposals[:, :, :2] = cls_logits
         reg_proposals[:, :, 4:] += reg
 
         # Apply nms
+        # 非极大值抑制
         proposals_list = self.nms(reg_proposals, attention_matrix, nms_thres, nms_topk, conf_threshold)
-
         return proposals_list
 
     def nms(self, batch_proposals, batch_attention_matrix, nms_thres, nms_topk, conf_threshold):
@@ -269,6 +290,7 @@ class LaneATT(nn.Module):
 
         # each row, first for x and second for y:
         # 2 scores, 1 start_y, start_x, 1 lenght, S coordinates, score[0] = negative prob, score[1] = positive prob
+        # cut为什么后面是fmap_h?
         anchors = torch.zeros((n_anchors, 2 + 2 + 1 + self.n_offsets))
         anchors_cut = torch.zeros((n_anchors, 2 + 2 + 1 + self.fmap_h))
         for i, start in enumerate(starts):
@@ -313,6 +335,7 @@ class LaneATT(nn.Module):
 
     @staticmethod
     def initialize_layer(layer):
+        #判断类型是不是 conv2d or linear
         if isinstance(layer, (nn.Conv2d, nn.Linear)):
             torch.nn.init.normal_(layer.weight, mean=0., std=0.001)
             if layer.bias is not None:
