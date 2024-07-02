@@ -43,10 +43,10 @@ class LaneATT(nn.Module):
         self.fmap_h = img_h // self.stride
         fmap_w = img_w // self.stride
         self.fmap_w = fmap_w
-        #x的偏移量 
+        #1到0的72个均匀间隔的数值的张量
         self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32)
         self.anchor_cut_ys = torch.linspace(1, 0, steps=self.fmap_h, dtype=torch.float32)
-        #anchor的深度为什么是64呀?不应该是类别+偏移+.. 么?
+        #这个是feature map的深度，可以任意深度，本出是64 ，也可以更低 ，深度可以被转换
         self.anchor_feat_channels = anchor_feat_channels
 
         # Anchor angles, same ones used in Line-CNN
@@ -69,7 +69,7 @@ class LaneATT(nn.Module):
             self.anchors_cut = self.anchors_cut[ind]
 
         # Pre compute indices for the anchor pooling
-        #?
+        # 计算特征地图中的anchor和真实图像之间的索引关系
         self.cut_zs, self.cut_ys, self.cut_xs, self.invalid_mask = self.compute_anchor_cut_indices(
             self.anchor_feat_channels, fmap_w, self.fmap_h)
 
@@ -96,7 +96,7 @@ class LaneATT(nn.Module):
         batch_features = self.feature_extractor(x)
         #2.1*1卷积,改变深度成为 anchor_feat_channels
         batch_features = self.conv1(batch_features)
-        #3.
+        #3. b c h w
         batch_anchor_features = self.cut_anchor_features(batch_features)
 
         # Join proposals from all images into a single proposals features batch
@@ -246,6 +246,7 @@ class LaneATT(nn.Module):
         unclamped_xs = torch.repeat_interleave(unclamped_xs, n_fmaps, dim=0).reshape(-1, 1)
         cut_xs = torch.clamp(unclamped_xs, 0, fmaps_w - 1)
         unclamped_xs = unclamped_xs.reshape(n_proposals, n_fmaps, fmaps_h, 1)
+        #原图中生成anchor生成的比较多，会超出feature map的范围，所以这个地方是计算了超出feature map的部分
         invalid_mask = (unclamped_xs < 0) | (unclamped_xs > fmaps_w)
         cut_ys = torch.arange(0, fmaps_h)
         cut_ys = cut_ys.repeat(n_fmaps * n_proposals)[:, None].reshape(n_proposals, n_fmaps, fmaps_h)
@@ -256,9 +257,13 @@ class LaneATT(nn.Module):
 
     def cut_anchor_features(self, features):
         # definitions
+        #batch size
         batch_size = features.shape[0]
+        # anchor个数，2784
         n_proposals = len(self.anchors)
+        #feature map的channal 64
         n_fmaps = features.shape[1]
+        # self.fmap_h： 11 最后一层的高度
         batch_anchor_features = torch.zeros((batch_size, n_proposals, n_fmaps, self.fmap_h, 1), device=features.device)
 
         # actual cutting
@@ -271,6 +276,7 @@ class LaneATT(nn.Module):
     #lateral_n:侧边
     #bottom_n:底边
     def generate_anchors(self, lateral_n, bottom_n):
+        # 2* 72 *6 + 128 * 15 = 2784个anchor
         left_anchors, left_cut = self.generate_side_anchors(self.left_angles, x=0., nb_origins=lateral_n)
         right_anchors, right_cut = self.generate_side_anchors(self.right_angles, x=1., nb_origins=lateral_n)
         bottom_anchors, bottom_cut = self.generate_side_anchors(self.bottom_angles, y=1., nb_origins=bottom_n)
@@ -280,17 +286,18 @@ class LaneATT(nn.Module):
     def generate_side_anchors(self, angles, nb_origins, x=None, y=None):
         #1.生成左右边/底边的起始坐标,个数为nb_origins (侧边:72 底面:128)
         if x is None and y is not None:
+            #bottom: y = 1 , x = 1 ~ 0 128等分
             starts = [(x, y) for x in np.linspace(1., 0., num=nb_origins)]
         elif x is not None and y is None:
+            #side: y = 1~0 72等分 , x = 0 
             starts = [(x, y) for y in np.linspace(1., 0., num=nb_origins)]
         else:
             raise Exception('Please define exactly one of `x` or `y` (not neither nor both)')
-        #2.侧边
+        # 起始点 * 角度个数 = anchor 个数
         n_anchors = nb_origins * len(angles)
-
         # each row, first for x and second for y:
         # 2 scores, 1 start_y, start_x, 1 lenght, S coordinates, score[0] = negative prob, score[1] = positive prob
-        # cut为什么后面是fmap_h?
+        # 空anchor:（anchor,2+2+1+offset)
         anchors = torch.zeros((n_anchors, 2 + 2 + 1 + self.n_offsets))
         anchors_cut = torch.zeros((n_anchors, 2 + 2 + 1 + self.fmap_h))
         for i, start in enumerate(starts):
@@ -302,6 +309,8 @@ class LaneATT(nn.Module):
         return anchors, anchors_cut
 
     def generate_anchor(self, start, angle, cut=False):
+        #self.anchor_ys = torch.linspace(1, 0, steps=self.n_offsets, dtype=torch.float32)
+        #self.anchor_cut_ys = torch.linspace(1, 0, steps=self.fmap_h, dtype=torch.float32)
         if cut:
             anchor_ys = self.anchor_cut_ys
             anchor = torch.zeros(2 + 2 + 1 + self.fmap_h)
