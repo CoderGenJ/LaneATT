@@ -1,0 +1,8 @@
+experiments/*
+**/__pycache__/*
+lib/nms/build/*
+lib/nms/build/*
+lib/nms/src/nms.egg-info/PKG-INFO
+lib/nms/src/nms.egg-info/SOURCES.txt
+tensorboard/*
+lib/nms/dist/
